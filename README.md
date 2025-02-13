@@ -1,4 +1,4 @@
-My personal practive of "Dive into Deep Learning"
+My personal practive of **"Dive into Deep Learning"**
 
 **tutorial source**:
 
