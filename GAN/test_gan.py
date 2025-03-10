@@ -1,13 +1,14 @@
 import torch 
 import torch.nn as nn
 import torchvision
+import numpy as np
 
-device = 'mps' if torch.backends.mps.is_built() else 'cpu'
-print(f"Using {device} device")
-torch.set_default_device(device)
 
-image_size = (1, 28, 28)
-image_dim = torch.prod(torch.tensor(image_size)).item()
+image_size = [1, 28, 28]
+latent_dim = 96
+batch_size = 64
+use_gpu = torch.cuda.is_available()
+use_mps = torch.backends.mps.is_built()
 
 class Generator(nn.Module):
     
@@ -15,18 +16,22 @@ class Generator(nn.Module):
         super().__init__()
 
         self.model = nn.Sequential(
-            nn.Linear(image_dim, 64),
-            nn.ReLU(inplace=True),
-            nn.Linear(64, 128),
-            nn.ReLU(inplace=True),
+            nn.Linear(latent_dim, 128),
+            torch.nn.BatchNorm1d(128),
+            torch.nn.GELU(),
+
             nn.Linear(128, 256),
-            nn.ReLU(inplace=True),
+            torch.nn.BatchNorm1d(256),
+            torch.nn.GELU(),
             nn.Linear(256, 512),
-            nn.ReLU(inplace=True),
+            torch.nn.BatchNorm1d(512),
+            torch.nn.GELU(),
             nn.Linear(512, 1024),
-            nn.ReLU(inplace=True),
-            nn.Linear(1024, image_dim),
-            nn.Tanh()
+            torch.nn.BatchNorm1d(1024),
+            torch.nn.GELU(),
+            nn.Linear(1024, np.prod(image_size, dtype=np.int32)),
+            #  nn.Tanh(),
+            nn.Sigmoid(),
         )
 
     def forward(self, z):
@@ -41,16 +46,18 @@ class Discriminator(nn.Module):
         super().__init__()
 
         self.model = nn.Sequential(
-            nn.Linear(image_dim, 1024),
-            nn.ReLU(inplace=True),
-            nn.Linear(1024, 512),
-            nn.ReLU(inplace=True),
+            nn.Linear(np.prod(image_size, dtype=np.int32), 512),
+            torch.nn.GELU(),
             nn.Linear(512, 256),
-            nn.ReLU(inplace=True),
+            torch.nn.GELU(),
             nn.Linear(256, 128),
-            nn.ReLU(inplace=True),
-            nn.Linear(128, 1),
-            nn.Sigmoid()
+            torch.nn.GELU(),
+            nn.Linear(128, 64),
+            torch.nn.GELU(),
+            nn.Linear(64, 32),
+            torch.nn.GELU(),
+            nn.Linear(32, 1),
+            nn.Sigmoid(),
         )
 
     def forward(self, image):
@@ -63,46 +70,62 @@ class Discriminator(nn.Module):
 dataset = torchvision.datasets.MNIST("data", train=True, download=True,
                                      transform=torchvision.transforms.Compose([
                                          torchvision.transforms.ToTensor(),
-                                         torchvision.transforms.Normalize((0.5,), (0.5,))
+                                        #  torchvision.transforms.Normalize((0.5,), (0.5,))
                                      ]))
 
-batch_size = 64
-dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, 
-                                         generator=torch.Generator(device='mps'))
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True,
+                                         )
 
-generator = Generator().to(device)
-discriminator = Discriminator().to(device)
+generator = Generator()
+discriminator = Discriminator()
 
-optimizer_G = torch.optim.Adam(generator.parameters(), lr=0.0001)
-optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=0.0001)
+optimizer_G = torch.optim.Adam(generator.parameters(), lr=0.0003, betas=(0.4, 0.8), weight_decay=0.0001)
+optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=0.0003, betas=(0.4, 0.8), weight_decay=0.0001)
 
-loss_fn = nn.BCELoss().to(device)
+loss_fn = nn.BCELoss()
+labels_one = torch.ones(batch_size, 1)
+labels_zero = torch.zeros(batch_size, 1)
+
+if use_gpu:
+    print("use gpu for training")
+    device = "cuda"
+    generator = generator.cuda()
+    discriminator = discriminator.cuda()
+    loss_fn = loss_fn.cuda()
+    labels_one = labels_one.to(device)
+    labels_zero = labels_zero.to(device)
+elif use_mps:
+    device = "mps"
+    print("use mps for training")
+    generator = generator.to(device)
+    discriminator = discriminator.to(device)
+    loss_fn = loss_fn.to(device)
+    labels_one = labels_one.to(device)
+    labels_zero = labels_zero.to(device)
 
 num_epochs = 100
 for epoch in range(num_epochs):
     for i, mini_batch in enumerate(dataloader):
         gt_images, _ = mini_batch
+        z = torch.randn(batch_size, latent_dim)
         gt_images = gt_images.to(device)
-        cur_batch_size = gt_images.size(0)
-        z = torch.randn(cur_batch_size, image_dim, device=device)
-        # if i == 0:
-        #     torchvision.utils.save_image(z.reshape(cur_batch_size, *image_size), f"GAN/output/{epoch}_raw.png", normalize=True)
+        z = z.to(device)
         pred_images = generator(z)
-        if i == 0:
-            # print(pred_images[0])
-            # print(pred_images[1])
-            torchvision.utils.save_image(pred_images, f"GAN/output/{epoch}.png", normalize=True)
         
         optimizer_G.zero_grad()
-        g_loss = loss_fn(discriminator(pred_images), torch.ones(cur_batch_size, 1))
+        g_loss = loss_fn(discriminator(pred_images), labels_one)
         g_loss.backward()
         optimizer_G.step()
 
         optimizer_D.zero_grad()
-        d_loss = 0.5 * (loss_fn(discriminator(gt_images), torch.ones(cur_batch_size, 1)) + \
-                 loss_fn(discriminator(pred_images.detach()), torch.zeros(cur_batch_size, 1)))
+        real_loss = loss_fn(discriminator(gt_images), labels_one)
+        fake_loss = loss_fn(discriminator(pred_images.detach()), labels_zero)
+        d_loss = real_loss + fake_loss
         d_loss.backward()
         optimizer_D.step()
+
+        if i % 500 == 0:
+            torchvision.utils.save_image(pred_images, f"GAN/output/{i}.png", nrow=8, normalize=True)
         
     
     print("finished epoch", epoch)

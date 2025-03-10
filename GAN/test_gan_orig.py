@@ -152,10 +152,8 @@ for epoch in range(num_epoch):
         d_loss.backward()
         d_optimizer.step()
 
-        if i % 50 == 0:
-            print(f"step:{len(dataloader)*epoch+i}, recons_loss:{recons_loss.item()}, g_loss:{g_loss.item()}, d_loss:{d_loss.item()}, real_loss:{real_loss.item()}, fake_loss:{fake_loss.item()}")
-
-        if i % 400 == 0:
-            image = pred_images[:16].data
-            torchvision.utils.save_image(image, f"GAN/output/image_{len(dataloader)*epoch+i}.png", nrow=4)
-
+        if i % 500 == 0:
+            torchvision.utils.save_image(pred_images, f"GAN/output/image_{i}.png", nrow=8)
+    
+    print("finished epoch", epoch)
+    print(f"generator loss: {g_loss.item()}, discriminator loss: {d_loss.item()}")
